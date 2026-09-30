@@ -20,7 +20,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-# ---------- Конфиг ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 WEBHOOK_PATH = "/webhook"
@@ -31,8 +30,7 @@ WEB_SERVER_PORT = int(os.getenv("PORT", 10000))
 SCHEDULE_FILE = "schedule.csv"
 USERS_FILE = "users.json"
 
-# Bootstrap-админы: эти ID всегда считаются админами, независимо от users.json.
-ADMIN_IDS = {123456789}
+ADMIN_IDS = {919578619}
 
 WEEKDAYS_RU = [
     "Понедельник", "Вторник", "Среда",
@@ -41,17 +39,19 @@ WEEKDAYS_RU = [
 
 ENCODINGS_TO_TRY = ("utf-8-sig", "cp1251", "utf-8")
 
-# Соответствие: тег пользователя -> значение в столбце "группа" CSV
 TAG_TO_CSV_GROUP = {
     "group221": "group1",
     "group222": "group2",
 }
 
-# ---------- Логирование ----------
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- Хранилище пользователей ----------
+
+
+
 def load_users() -> dict:
     if Path(USERS_FILE).exists():
         try:
@@ -70,7 +70,9 @@ def save_users(users: dict):
 
 users_db = load_users()
 
-# ---------- Роли и группы ----------
+
+
+
 def is_admin(user_id: int) -> bool:
     """Админ = либо в ADMIN_IDS (bootstrap), либо role='admin' в users.json."""
     if user_id in ADMIN_IDS:
@@ -84,7 +86,6 @@ def get_user_tag(user_id: int) -> str | None:
     if not rec:
         return None
     tag = rec.get("tag")
-    # 'admin', '—' и прочее — не группа
     if tag in TAG_TO_CSV_GROUP:
         return tag
     return None
@@ -104,7 +105,9 @@ def ensure_admin_registered(user_id: int):
     users_db[uid] = rec
     save_users(users_db)
 
-# ---------- Работа с расписанием ----------
+
+
+
 def format_date(dt: datetime) -> str:
     return dt.strftime("%d.%m.%Y")
 
@@ -186,7 +189,7 @@ def render_schedule(date_str: str, weekday: str, rows: list[dict], title: str) -
     lines = [
         f"{title} ({date_str} - {weekday}):",
         "",
-        f"Всего пар сегодня: {len(rows)}",
+        f"Всего пар в этот день: {len(rows)}",
         "",
     ]
     for i, row in enumerate(rows, start=1):
@@ -201,7 +204,9 @@ def render_schedule(date_str: str, weekday: str, rows: list[dict], title: str) -
         lines.append("")
     return "\n".join(lines).strip()
 
-# ---------- Клавиатуры ----------
+
+
+
 def group_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="ИОЗ-221", callback_data="set_group:group221")],
@@ -217,30 +222,38 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Указать свою дату", callback_data="day:custom")],
     ])
 
-# ---------- FSM ----------
+
+
+
 class UserStates(StatesGroup):
     choosing_group = State()
     custom_date = State()
 
-# ---------- Инициализация бота ----------
+
+
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
 START_TEXT = "{group}. Расписание нужно на...:"
 
-# ---------- Тексты-напоминания ----------
+
+
+
 NO_GROUP_TEXT = (
     "⚠️ Сначала выбери свою группу.\n"
     "Нажми /start и выбери ИОЗ-221 или ИОЗ-222."
 )
 
-# ---------- /start ----------
+
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     uid = str(message.from_user.id)
     ensure_admin_registered(message.from_user.id)
 
-    # Даём пользователю выбрать/поменять группу, если её нет.
+
     if not has_group(message.from_user.id):
         await state.set_state(UserStates.choosing_group)
         await message.answer(
@@ -256,7 +269,10 @@ async def cmd_start(message: Message, state: FSMContext):
         reply_markup=main_menu_keyboard(),
     )
 
-# ---------- Выбор группы ----------
+
+
+
+
 @dp.callback_query(F.data.startswith("set_group:"))
 async def set_group(cb: CallbackQuery, state: FSMContext):
     tag = cb.data.split(":", 1)[1]
@@ -281,7 +297,9 @@ async def set_group(cb: CallbackQuery, state: FSMContext):
     )
     await cb.answer()
 
-# ---------- /getid (для всех) ----------
+
+
+
 @dp.message(Command("getid"))
 async def cmd_getid(message: Message):
     uid = message.from_user.id
@@ -296,7 +314,9 @@ async def cmd_getid(message: Message):
         f"🎭 Роль: {role}"
     )
 
-# ---------- /getid_all (только админ) ----------
+
+
+
 @dp.message(Command("getid_all"))
 async def cmd_getid_all(message: Message):
     if not is_admin(message.from_user.id):
@@ -318,7 +338,9 @@ async def cmd_getid_all(message: Message):
     for i in range(0, len(text), 4000):
         await message.answer(text[i:i + 4000])
 
-# ---------- /setgroup (только админ) ----------
+
+
+
 @dp.message(Command("setgroup"))
 async def admin_setgroup(message: Message):
     if not is_admin(message.from_user.id):
@@ -341,7 +363,9 @@ async def admin_setgroup(message: Message):
     save_users(users_db)
     await message.answer(f"✅ Пользователю <code>{target_id}</code> установлена группа {display}")
 
-# ---------- /grant_admin (только админ) ----------
+
+
+
 @dp.message(Command("grant_admin"))
 async def cmd_grant_admin(message: Message):
     if not is_admin(message.from_user.id):
@@ -360,7 +384,9 @@ async def cmd_grant_admin(message: Message):
     save_users(users_db)
     await message.answer(f"✅ Пользователь <code>{target}</code> теперь админ.")
 
-# ---------- /revoke_admin (только админ) ----------
+
+
+
 @dp.message(Command("revoke_admin"))
 async def cmd_revoke_admin(message: Message):
     if not is_admin(message.from_user.id):
@@ -383,7 +409,9 @@ async def cmd_revoke_admin(message: Message):
         save_users(users_db)
     await message.answer(f"✅ Права админа у <code>{target}</code> сняты.")
 
-# ---------- Хелпер: показ расписания ----------
+
+
+
 async def show_schedule(cb: CallbackQuery, dt: datetime, title: str):
     uid = cb.from_user.id
     user_tag = get_user_tag(uid)
@@ -402,7 +430,9 @@ async def show_schedule(cb: CallbackQuery, dt: datetime, title: str):
         await cb.message.answer(text)
     await cb.message.answer("Что-нибудь ещё?", reply_markup=main_menu_keyboard())
 
-# ---------- Сегодня / Завтра ----------
+
+
+
 @dp.callback_query(F.data == "day:today")
 async def day_today(cb: CallbackQuery, state: FSMContext):
     if not has_group(cb.from_user.id):
@@ -421,7 +451,9 @@ async def day_tomorrow(cb: CallbackQuery, state: FSMContext):
     await show_schedule(cb, datetime.now() + timedelta(days=1), "Расписание на завтра")
     await cb.answer()
 
-# ---------- Своя дата ----------
+
+
+
 @dp.callback_query(F.data == "day:custom")
 async def day_custom(cb: CallbackQuery, state: FSMContext):
     if not has_group(cb.from_user.id):
@@ -457,13 +489,15 @@ async def process_custom_date(message: Message, state: FSMContext):
     await message.answer(text)
     await message.answer("Что-нибудь ещё?", reply_markup=main_menu_keyboard())
 
-# ---------- Универсальный fallback: любой текст без команды ----------
+
+
+
 @dp.message(F.text & ~F.text.startswith("/"))
 async def fallback_text(message: Message, state: FSMContext):
     """Ловит любой текст вне сценариев и подсказывает, что делать."""
     current_state = await state.get_state()
 
-    # Если пользователь в процессе ввода даты — не мешаем (обработчик выше)
+
     if current_state == UserStates.custom_date.state:
         return
 
@@ -478,7 +512,9 @@ async def fallback_text(message: Message, state: FSMContext):
         reply_markup=main_menu_keyboard(),
     )
 
-# ---------- Webhook ----------
+
+
+
 async def on_startup(bot: Bot):
     logger.info(f"Setting webhook to {WEBHOOK_URL}")
     try:
