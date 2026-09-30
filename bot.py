@@ -32,15 +32,13 @@ SCHEDULE_FILE = "schedule.csv"
 USERS_FILE = "users.json"
 
 # Bootstrap-админы: эти ID всегда считаются админами, независимо от users.json.
-# Впиши свой Telegram ID (узнать можно командой /getid).
-ADMIN_IDS = {919578619}
+ADMIN_IDS = {123456789}
 
 WEEKDAYS_RU = [
     "Понедельник", "Вторник", "Среда",
     "Четверг", "Пятница", "Суббота", "Воскресенье",
 ]
 
-# Кодировки, которые пробуем по очереди при чтении CSV
 ENCODINGS_TO_TRY = ("utf-8-sig", "cp1251", "utf-8")
 
 # Соответствие: тег пользователя -> значение в столбце "группа" CSV
@@ -72,7 +70,7 @@ def save_users(users: dict):
 
 users_db = load_users()
 
-# ---------- Роли ----------
+# ---------- Роли и группы ----------
 def is_admin(user_id: int) -> bool:
     """Админ = либо в ADMIN_IDS (bootstrap), либо role='admin' в users.json."""
     if user_id in ADMIN_IDS:
@@ -80,8 +78,22 @@ def is_admin(user_id: int) -> bool:
     rec = users_db.get(str(user_id))
     return bool(rec and rec.get("role") == "admin")
 
+def get_user_tag(user_id: int) -> str | None:
+    """Возвращает тег группы пользователя (group221/group222) или None."""
+    rec = users_db.get(str(user_id))
+    if not rec:
+        return None
+    tag = rec.get("tag")
+    # 'admin', '—' и прочее — не группа
+    if tag in TAG_TO_CSV_GROUP:
+        return tag
+    return None
+
+def has_group(user_id: int) -> bool:
+    return get_user_tag(user_id) is not None
+
 def ensure_admin_registered(user_id: int):
-    """Если ID в ADMIN_IDS — гарантированно записать его в users_db как админа."""
+    """Если ID в ADMIN_IDS — записать его в users_db как админа."""
     if user_id not in ADMIN_IDS:
         return
     uid = str(user_id)
@@ -150,17 +162,8 @@ def _read_schedule_rows() -> list[dict]:
         rows.append(clean)
     return rows
 
-def _get_csv_group_for_tag(tag: str) -> str | None:
-    """Возвращает значение столбца 'группа' CSV, соответствующее тегу пользователя."""
-    return TAG_TO_CSV_GROUP.get(tag)
-
-def get_schedule_for_date(date_str: str, user_tag: str | None) -> list[dict]:
-    """
-    Возвращает расписание на указанную дату, отфильтрованное по группе пользователя.
-    Столбец CSV называется 'группа' (значения group1 / group2).
-    Если у пользователя нет тега группы — вернём пусто.
-    """
-    csv_group = _get_csv_group_for_tag(user_tag) if user_tag else None
+def get_schedule_for_date(date_str: str, user_tag: str) -> list[dict]:
+    csv_group = TAG_TO_CSV_GROUP.get(user_tag)
     if not csv_group:
         return []
 
@@ -168,16 +171,12 @@ def get_schedule_for_date(date_str: str, user_tag: str | None) -> list[dict]:
     for r in _read_schedule_rows():
         if r.get("date_o") != date_str:
             continue
-
-        # Столбец может называться "группа" (кириллица) или "group" — берём оба варианта.
         row_group = r.get("группа") or r.get("group") or ""
         if row_group != csv_group:
             continue
-
         disc = (r.get("discipline") or "").strip()
         if disc in ("", "—", "-"):
             continue
-
         result.append(r)
     return result
 
@@ -229,24 +228,33 @@ dp = Dispatcher(storage=MemoryStorage())
 
 START_TEXT = "{group}. Расписание нужно на...:"
 
+# ---------- Тексты-напоминания ----------
+NO_GROUP_TEXT = (
+    "⚠️ Сначала выбери свою группу.\n"
+    "Нажми /start и выбери ИОЗ-221 или ИОЗ-222."
+)
+
 # ---------- /start ----------
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     uid = str(message.from_user.id)
     ensure_admin_registered(message.from_user.id)
 
-    if uid not in users_db:
+    # Даём пользователю выбрать/поменять группу, если её нет.
+    if not has_group(message.from_user.id):
         await state.set_state(UserStates.choosing_group)
         await message.answer(
             "Привет! 👋\nК какой группе ты относишься?",
             reply_markup=group_keyboard(),
         )
-    else:
-        group = users_db[uid].get("group", "—")
-        await message.answer(
-            START_TEXT.format(group=group),
-            reply_markup=main_menu_keyboard(),
-        )
+        return
+
+    group = users_db[uid].get("group", "—")
+    await state.clear()
+    await message.answer(
+        START_TEXT.format(group=group),
+        reply_markup=main_menu_keyboard(),
+    )
 
 # ---------- Выбор группы ----------
 @dp.callback_query(F.data.startswith("set_group:"))
@@ -279,7 +287,7 @@ async def cmd_getid(message: Message):
     uid = message.from_user.id
     username = f"@{message.from_user.username}" if message.from_user.username else "—"
     rec = users_db.get(str(uid), {})
-    group = rec.get("group", "не выбрана")
+    group = rec.get("group") if has_group(uid) else "не выбрана"
     role = rec.get("role") or ("admin" if is_admin(uid) else "user")
     await message.answer(
         f"🆔 Твой Telegram ID: <code>{uid}</code>\n"
@@ -377,14 +385,11 @@ async def cmd_revoke_admin(message: Message):
 
 # ---------- Хелпер: показ расписания ----------
 async def show_schedule(cb: CallbackQuery, dt: datetime, title: str):
-    uid = str(cb.from_user.id)
-    rec = users_db.get(uid, {})
-    user_tag = rec.get("tag")
+    uid = cb.from_user.id
+    user_tag = get_user_tag(uid)
 
     if not user_tag:
-        await cb.message.answer(
-            "⚠️ У тебя не выбрана группа. Отправь /start, чтобы выбрать."
-        )
+        await cb.message.answer(NO_GROUP_TEXT, reply_markup=group_keyboard())
         return
 
     date_str = format_date(dt)
@@ -400,18 +405,18 @@ async def show_schedule(cb: CallbackQuery, dt: datetime, title: str):
 # ---------- Сегодня / Завтра ----------
 @dp.callback_query(F.data == "day:today")
 async def day_today(cb: CallbackQuery, state: FSMContext):
-    uid = str(cb.from_user.id)
-    if uid not in users_db:
+    if not has_group(cb.from_user.id):
         await cb.answer("Сначала выбери группу через /start", show_alert=True)
+        await cb.message.answer(NO_GROUP_TEXT, reply_markup=group_keyboard())
         return
     await show_schedule(cb, datetime.now(), "Расписание на сегодня")
     await cb.answer()
 
 @dp.callback_query(F.data == "day:tomorrow")
 async def day_tomorrow(cb: CallbackQuery, state: FSMContext):
-    uid = str(cb.from_user.id)
-    if uid not in users_db:
+    if not has_group(cb.from_user.id):
         await cb.answer("Сначала выбери группу через /start", show_alert=True)
+        await cb.message.answer(NO_GROUP_TEXT, reply_markup=group_keyboard())
         return
     await show_schedule(cb, datetime.now() + timedelta(days=1), "Расписание на завтра")
     await cb.answer()
@@ -419,9 +424,9 @@ async def day_tomorrow(cb: CallbackQuery, state: FSMContext):
 # ---------- Своя дата ----------
 @dp.callback_query(F.data == "day:custom")
 async def day_custom(cb: CallbackQuery, state: FSMContext):
-    uid = str(cb.from_user.id)
-    if uid not in users_db:
+    if not has_group(cb.from_user.id):
         await cb.answer("Сначала выбери группу через /start", show_alert=True)
+        await cb.message.answer(NO_GROUP_TEXT, reply_markup=group_keyboard())
         return
     await state.set_state(UserStates.custom_date)
     await cb.message.answer(
@@ -438,15 +443,11 @@ async def process_custom_date(message: Message, state: FSMContext):
         await message.answer("❌ Неверный формат. Попробуй ещё раз: ДД.ММ.ГГГГ")
         return
 
-    uid = str(message.from_user.id)
-    rec = users_db.get(uid, {})
-    user_tag = rec.get("tag")
+    user_tag = get_user_tag(message.from_user.id)
     await state.clear()
 
     if not user_tag:
-        await message.answer(
-            "⚠️ У тебя не выбрана группа. Отправь /start, чтобы выбрать."
-        )
+        await message.answer(NO_GROUP_TEXT, reply_markup=group_keyboard())
         return
 
     date_str = format_date(dt)
@@ -455,6 +456,27 @@ async def process_custom_date(message: Message, state: FSMContext):
     text = render_schedule(date_str, weekday, rows, "Расписание")
     await message.answer(text)
     await message.answer("Что-нибудь ещё?", reply_markup=main_menu_keyboard())
+
+# ---------- Универсальный fallback: любой текст без команды ----------
+@dp.message(F.text & ~F.text.startswith("/"))
+async def fallback_text(message: Message, state: FSMContext):
+    """Ловит любой текст вне сценариев и подсказывает, что делать."""
+    current_state = await state.get_state()
+
+    # Если пользователь в процессе ввода даты — не мешаем (обработчик выше)
+    if current_state == UserStates.custom_date.state:
+        return
+
+    if not has_group(message.from_user.id):
+        await state.set_state(UserStates.choosing_group)
+        await message.answer(NO_GROUP_TEXT, reply_markup=group_keyboard())
+        return
+
+    group = users_db.get(str(message.from_user.id), {}).get("group", "—")
+    await message.answer(
+        START_TEXT.format(group=group),
+        reply_markup=main_menu_keyboard(),
+    )
 
 # ---------- Webhook ----------
 async def on_startup(bot: Bot):
