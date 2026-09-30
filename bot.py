@@ -43,6 +43,12 @@ WEEKDAYS_RU = [
 # Кодировки, которые пробуем по очереди при чтении CSV
 ENCODINGS_TO_TRY = ("utf-8-sig", "cp1251", "utf-8")
 
+# Соответствие: тег пользователя -> значение в столбце "группа" CSV
+TAG_TO_CSV_GROUP = {
+    "group221": "group1",
+    "group222": "group2",
+}
+
 # ---------- Логирование ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -144,14 +150,34 @@ def _read_schedule_rows() -> list[dict]:
         rows.append(clean)
     return rows
 
-def get_schedule_for_date(date_str: str) -> list[dict]:
+def _get_csv_group_for_tag(tag: str) -> str | None:
+    """Возвращает значение столбца 'группа' CSV, соответствующее тегу пользователя."""
+    return TAG_TO_CSV_GROUP.get(tag)
+
+def get_schedule_for_date(date_str: str, user_tag: str | None) -> list[dict]:
+    """
+    Возвращает расписание на указанную дату, отфильтрованное по группе пользователя.
+    Столбец CSV называется 'группа' (значения group1 / group2).
+    Если у пользователя нет тега группы — вернём пусто.
+    """
+    csv_group = _get_csv_group_for_tag(user_tag) if user_tag else None
+    if not csv_group:
+        return []
+
     result = []
     for r in _read_schedule_rows():
         if r.get("date_o") != date_str:
             continue
+
+        # Столбец может называться "группа" (кириллица) или "group" — берём оба варианта.
+        row_group = r.get("группа") or r.get("group") or ""
+        if row_group != csv_group:
+            continue
+
         disc = (r.get("discipline") or "").strip()
         if disc in ("", "—", "-"):
             continue
+
         result.append(r)
     return result
 
@@ -351,9 +377,19 @@ async def cmd_revoke_admin(message: Message):
 
 # ---------- Хелпер: показ расписания ----------
 async def show_schedule(cb: CallbackQuery, dt: datetime, title: str):
+    uid = str(cb.from_user.id)
+    rec = users_db.get(uid, {})
+    user_tag = rec.get("tag")
+
+    if not user_tag:
+        await cb.message.answer(
+            "⚠️ У тебя не выбрана группа. Отправь /start, чтобы выбрать."
+        )
+        return
+
     date_str = format_date(dt)
     weekday = WEEKDAYS_RU[dt.weekday()]
-    rows = get_schedule_for_date(date_str)
+    rows = get_schedule_for_date(date_str, user_tag)
     text = render_schedule(date_str, weekday, rows, title)
     try:
         await cb.message.edit_text(text)
@@ -401,22 +437,42 @@ async def process_custom_date(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Неверный формат. Попробуй ещё раз: ДД.ММ.ГГГГ")
         return
+
+    uid = str(message.from_user.id)
+    rec = users_db.get(uid, {})
+    user_tag = rec.get("tag")
+    await state.clear()
+
+    if not user_tag:
+        await message.answer(
+            "⚠️ У тебя не выбрана группа. Отправь /start, чтобы выбрать."
+        )
+        return
+
     date_str = format_date(dt)
     weekday = WEEKDAYS_RU[dt.weekday()]
-    rows = get_schedule_for_date(date_str)
+    rows = get_schedule_for_date(date_str, user_tag)
     text = render_schedule(date_str, weekday, rows, "Расписание")
-    await state.clear()
     await message.answer(text)
     await message.answer("Что-нибудь ещё?", reply_markup=main_menu_keyboard())
 
 # ---------- Webhook ----------
 async def on_startup(bot: Bot):
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-    logger.info(f"Webhook set to {WEBHOOK_URL}")
+    logger.info(f"Setting webhook to {WEBHOOK_URL}")
+    try:
+        result = await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=False)
+        logger.info(f"setWebhook result: {result}")
+        info = await bot.get_webhook_info()
+        logger.info(
+            f"Webhook info: url={info.url}, pending={info.pending_update_count}"
+        )
+    except Exception as e:
+        logger.exception(f"Не удалось установить вебхук: {e}")
+        raise
 
 async def on_shutdown(bot: Bot):
     try:
-        await bot.delete_webhook()
+        await bot.session.close()
     except Exception:
         pass
 
