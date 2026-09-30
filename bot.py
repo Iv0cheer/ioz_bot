@@ -1,18 +1,16 @@
 import os
 import json
-import asyncio
+import csv
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message, CallbackQuery,
-    ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
 from aiogram.fsm.state import State, StatesGroup
@@ -32,47 +30,77 @@ WEB_SERVER_PORT = int(os.getenv("PORT", 10000))
 
 SCHEDULE_FILE = "schedule.csv"
 USERS_FILE = "users.json"
-ADMIN_IDS = {123456789}  # <-- сюда впиши Telegram ID админов
+ADMIN_IDS = {123456789}  # <-- впиши Telegram ID админов (можно несколько: {111, 222})
+
+WEEKDAYS_RU = [
+    "Понедельник", "Вторник", "Среда",
+    "Четверг", "Пятница", "Суббота", "Воскресенье",
+]
 
 # ---------- Логирование ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- Хранилище пользователей (простое JSON-файло) ----------
+# ---------- Хранилище пользователей (JSON-файл) ----------
 def load_users() -> dict:
     if Path(USERS_FILE).exists():
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Не удалось прочитать {USERS_FILE}: {e}")
     return {}
 
 def save_users(users: dict):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(users, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить {USERS_FILE}: {e}")
 
 users_db = load_users()
 
-# ---------- Загрузка расписания ----------
-def load_schedule() -> pd.DataFrame:
-    df = pd.read_csv(SCHEDULE_FILE, dtype=str)
-    df.columns = [c.strip() for c in df.columns]
-    df["date_o"] = df["date_o"].astype(str).str.strip()
-    return df
-
+# ---------- Работа с расписанием (чистый csv, без pandas) ----------
 def format_date(dt: datetime) -> str:
     return dt.strftime("%d.%m.%Y")
 
-def get_schedule_for_date(date_str: str) -> pd.DataFrame:
-    df = load_schedule()
-    return df[df["date_o"] == date_str].reset_index(drop=True)
+def get_schedule_for_date(date_str: str) -> list[dict]:
+    """Возвращает список строк расписания на указанную дату (ДД.ММ.ГГГГ)."""
+    rows: list[dict] = []
+    if not Path(SCHEDULE_FILE).exists():
+        logger.error(f"Файл {SCHEDULE_FILE} не найден")
+        return rows
+    with open(SCHEDULE_FILE, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames:
+            reader.fieldnames = [h.strip() for h in reader.fieldnames]
+        for row in reader:
+            clean = {
+                (k.strip() if k else ""): (v or "").strip()
+                for k, v in row.items()
+            }
+            if clean.get("date_o") == date_str:
+                rows.append(clean)
+    return rows
 
-def render_schedule(date_str: str, weekday: str, df: pd.DataFrame, title: str) -> str:
-    if df.empty:
+def render_schedule(date_str: str, weekday: str, rows: list[dict], title: str) -> str:
+    if not rows:
         return f"{title} ({date_str} - {weekday}):\n\nНа этот день пар нет."
-    lines = [f"{title} ({date_str} - {weekday}):", "", f"Всего пар сегодня: {len(df)}", ""]
-    for i, row in df.iterrows():
-        lines.append(f"{i+1}. {row['discipline']} / {row['type_disc']} - {row['audience']}")
-        lines.append(f"{row['teacher']}")
-        lines.append(f"{row['timestamp_lesson']}")
+    lines = [
+        f"{title} ({date_str} - {weekday}):",
+        "",
+        f"Всего пар сегодня: {len(rows)}",
+        "",
+    ]
+    for i, row in enumerate(rows, start=1):
+        discipline = row.get("discipline", "—")
+        type_disc = row.get("type_disc", "—")
+        audience = row.get("audience", "—")
+        teacher = row.get("teacher", "—")
+        ts = row.get("timestamp_lesson", "—")
+        lines.append(f"{i}. {discipline} / {type_disc} - {audience}")
+        lines.append(teacher)
+        lines.append(ts)
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -97,7 +125,7 @@ class UserStates(StatesGroup):
     choosing_group = State()
     custom_date = State()
 
-# ---------- Инициализация ----------
+# ---------- Инициализация бота ----------
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -123,33 +151,42 @@ async def cmd_start(message: Message, state: FSMContext):
 # ---------- Выбор группы ----------
 @dp.callback_query(F.data.startswith("set_group:"))
 async def set_group(cb: CallbackQuery, state: FSMContext):
-    tag = cb.data.split(":")[1]  # group221 / group222
+    tag = cb.data.split(":", 1)[1]  # group221 / group222
     display = "ИОЗ-221" if tag == "group221" else "ИОЗ-222"
     uid = str(cb.from_user.id)
     users_db[uid] = {"group": display, "tag": tag}
     save_users(users_db)
     await state.clear()
-    await cb.message.edit_text(f"✅ Твоя группа: <b>{display}</b> (тег: <code>{tag}</code>)")
+    try:
+        await cb.message.edit_text(f"✅ Твоя группа: <b>{display}</b> (тег: <code>{tag}</code>)")
+    except Exception:
+        pass
     await cb.message.answer(
         START_TEXT.format(group=display),
         reply_markup=main_menu_keyboard(),
     )
     await cb.answer()
 
-# ---------- Обработка кнопок дней ----------
+# ---------- Хелпер: показывает расписание ----------
+async def show_schedule(cb: CallbackQuery, dt: datetime, title: str):
+    date_str = format_date(dt)
+    weekday = WEEKDAYS_RU[dt.weekday()]
+    rows = get_schedule_for_date(date_str)
+    text = render_schedule(date_str, weekday, rows, title)
+    try:
+        await cb.message.edit_text(text)
+    except Exception:
+        await cb.message.answer(text)
+    await cb.message.answer("Что-нибудь ещё?", reply_markup=main_menu_keyboard())
+
+# ---------- Кнопки "Сегодня" / "Завтра" ----------
 @dp.callback_query(F.data == "day:today")
 async def day_today(cb: CallbackQuery, state: FSMContext):
     uid = str(cb.from_user.id)
     if uid not in users_db:
         await cb.answer("Сначала выбери группу через /start", show_alert=True)
         return
-    dt = datetime.now()
-    date_str = format_date(dt)
-    weekday = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"][dt.weekday()]
-    df = get_schedule_for_date(date_str)
-    text = render_schedule(date_str, weekday, df, "Расписание на сегодня")
-    await cb.message.edit_text(text)
-    await cb.message.answer("Что-нибудь ещё?", reply_markup=main_menu_keyboard())
+    await show_schedule(cb, datetime.now(), "Расписание на сегодня")
     await cb.answer()
 
 @dp.callback_query(F.data == "day:tomorrow")
@@ -158,15 +195,10 @@ async def day_tomorrow(cb: CallbackQuery, state: FSMContext):
     if uid not in users_db:
         await cb.answer("Сначала выбери группу через /start", show_alert=True)
         return
-    dt = datetime.now() + timedelta(days=1)
-    date_str = format_date(dt)
-    weekday = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"][dt.weekday()]
-    df = get_schedule_for_date(date_str)
-    text = render_schedule(date_str, weekday, df, "Расписание на завтра")
-    await cb.message.edit_text(text)
-    await cb.message.answer("Что-нибудь ещё?", reply_markup=main_menu_keyboard())
+    await show_schedule(cb, datetime.now() + timedelta(days=1), "Расписание на завтра")
     await cb.answer()
 
+# ---------- "Указать свою дату" ----------
 @dp.callback_query(F.data == "day:custom")
 async def day_custom(cb: CallbackQuery, state: FSMContext):
     uid = str(cb.from_user.id)
@@ -179,16 +211,16 @@ async def day_custom(cb: CallbackQuery, state: FSMContext):
 
 @dp.message(UserStates.custom_date)
 async def process_custom_date(message: Message, state: FSMContext):
-    txt = message.text.strip()
+    txt = (message.text or "").strip()
     try:
         dt = datetime.strptime(txt, "%d.%m.%Y")
     except ValueError:
         await message.answer("❌ Неверный формат. Попробуй ещё раз: ДД.ММ.ГГГГ")
         return
     date_str = format_date(dt)
-    weekday = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"][dt.weekday()]
-    df = get_schedule_for_date(date_str)
-    text = render_schedule(date_str, weekday, df, "Расписание")
+    weekday = WEEKDAYS_RU[dt.weekday()]
+    rows = get_schedule_for_date(date_str)
+    text = render_schedule(date_str, weekday, rows, "Расписание")
     await state.clear()
     await message.answer(text)
     await message.answer("Что-нибудь ещё?", reply_markup=main_menu_keyboard())
@@ -199,8 +231,7 @@ async def admin_setgroup(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("⛔ Нет прав.")
         return
-    # /setgroup <user_id> <group221|group222>
-    parts = message.text.split()
+    parts = (message.text or "").split()
     if len(parts) != 3:
         await message.answer("Использование: /setgroup <user_id> <group221|group222>")
         return
@@ -219,7 +250,10 @@ async def on_startup(bot: Bot):
     logger.info(f"Webhook set to {WEBHOOK_URL}")
 
 async def on_shutdown(bot: Bot):
-    await bot.delete_webhook()
+    try:
+        await bot.delete_webhook()
+    except Exception:
+        pass
 
 def main():
     dp.startup.register(on_startup)
