@@ -33,7 +33,7 @@ USERS_FILE = "users.json"
 
 # Bootstrap-админы: эти ID всегда считаются админами, независимо от users.json.
 # Впиши свой Telegram ID (узнать можно командой /getid).
-ADMIN_IDS = {123456789}
+ADMIN_IDS = {919578619}
 
 WEEKDAYS_RU = [
     "Понедельник", "Вторник", "Среда",
