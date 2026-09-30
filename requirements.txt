@@ -1,0 +1,3 @@
+aiogram==3.13.1
+pandas==2.2.2
+aiohttp==3.10.5
